@@ -1,0 +1,68 @@
+name: Split Video Scenes
+
+on:
+  workflow_dispatch:
+
+jobs:
+  split:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: sudo apt-get install -y ffmpeg python3-pip
+
+      - name: Install scenedetect
+        run: pip install scenedetect[opencv]
+
+      - name: Detect and split scenes
+        run: |
+          mkdir -p output
+          python3 - <<'EOF'
+          from scenedetect import open_video, SceneManager
+          from scenedetect.detectors import ContentDetector
+          from scenedetect.video_splitter import split_video_ffmpeg
+
+          video_path = "data/77dbc453b90cb7c66789f2ad4e80d9b2.mp4"
+
+          video = open_video(video_path)
+          scene_manager = SceneManager()
+          scene_manager.add_detector(ContentDetector(threshold=27.0))
+          scene_manager.detect_scenes(video)
+
+          scene_list = scene_manager.get_scene_list()
+          print(f"Detected {len(scene_list)} scenes")
+
+          if len(scene_list) == 0:
+            print("No scenes detected, lowering threshold and retrying...")
+            video = open_video(video_path)
+            scene_manager = SceneManager()
+            scene_manager.add_detector(ContentDetector(threshold=15.0))
+            scene_manager.detect_scenes(video)
+            scene_list = scene_manager.get_scene_list()
+            print(f"Detected {len(scene_list)} scenes at lower threshold")
+
+          split_video_ffmpeg(
+            video_path,
+            scene_list,
+            output_dir="output",
+            output_file_template="scene_$SCENE_NUMBER.mp4"
+          )
+          EOF
+
+      - name: Zip all scenes
+        run: |
+          cd output
+          zip -r ../scenes.zip *.mp4
+          cd ..
+          echo "Scenes zipped:"
+          ls -lh scenes.zip
+
+      - name: Upload zip as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenes
+          path: scenes.zip
+          retention-days: 7

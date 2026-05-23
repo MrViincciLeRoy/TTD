@@ -7,18 +7,10 @@ on:
         description: 'Target video duration in seconds (min 180 for monetization)'
         required: true
         default: '210'
-      sa_living_ratio:
-        description: 'Insert 1 SA Living clip every N filler clips'
-        required: true
-        default: '4'
       music_volume:
         description: 'Background music volume 0.0-1.0'
         required: true
         default: '0.15'
-      min_views:
-        description: 'Minimum views filter for Tier1 accounts'
-        required: true
-        default: '10000'
       clips_per_account:
         description: 'Max clips to pull per account'
         required: true
@@ -35,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get install -y ffmpeg
-          pip install yt-dlp gdown scenedetect[opencv]
+          pip install yt-dlp gdown
 
       - name: Download amapiano from Google Drive
         run: |
@@ -48,26 +40,10 @@ jobs:
               shutil.copy(random.choice(tracks), 'music.mp3')
               print('Music ready')
           else:
-              print('No music')
+              print('No music available')
           "
 
-      - name: Download Tier1 - SA Living reposts
-        run: |
-          mkdir -p content/tier1
-          for account in funnycomedyscreen moment.later4.1 mfanakahtk.co.za sachoasvibes; do
-            echo "=== @$account ==="
-            mkdir -p "content/tier1/$account"
-            yt-dlp \
-              --match-filter "view_count>=${{ github.event.inputs.min_views }}" \
-              --max-downloads "${{ github.event.inputs.clips_per_account }}" \
-              --playlist-end "${{ github.event.inputs.clips_per_account }}" \
-              -o "content/tier1/$account/%(id)s.%(ext)s" \
-              --no-warnings --ignore-errors \
-              "https://www.tiktok.com/@$account" || true
-            echo "Got $(ls content/tier1/$account/*.mp4 2>/dev/null | wc -l) videos"
-          done
-
-      - name: Download Tier2 - Filler content
+      - name: Download Tier2 clips
         run: |
           mkdir -p content/tier2
           for account in daily_sa_1 mzansimemes1 funnyorama fun.only52 available4.8 funny.clips.57; do
@@ -82,97 +58,26 @@ jobs:
             echo "Got $(ls content/tier2/$account/*.mp4 2>/dev/null | wc -l) videos"
           done
 
-      - name: Split Tier1 into scenes
-        run: |
-          mkdir -p content/tier1_scenes
-          find content/tier1 -name "*.mp4" | while read video; do
-            account=$(echo "$video" | cut -d'/' -f3)
-            filename=$(basename "$video" .mp4)
-            outdir="content/tier1_scenes/$account"
-            mkdir -p "$outdir"
-            python3 - <<EOF
-          from scenedetect import open_video, SceneManager
-          from scenedetect.detectors import ContentDetector
-          import subprocess, shutil, os
-
-          path, out, name = "$video", "$outdir", "$filename"
-          try:
-              v = open_video(path)
-              sm = SceneManager()
-              sm.add_detector(ContentDetector(threshold=27.0))
-              sm.detect_scenes(v)
-              scenes = sm.get_scene_list()
-              if len(scenes) <= 1:
-                  v = open_video(path)
-                  sm = SceneManager()
-                  sm.add_detector(ContentDetector(threshold=15.0))
-                  sm.detect_scenes(v)
-                  scenes = sm.get_scene_list()
-              print(f"{name}: {len(scenes)} scenes")
-              if len(scenes) > 1:
-                  for idx, (start, end) in enumerate(scenes):
-                      start_sec = start.get_seconds()
-                      end_sec = end.get_seconds()
-                      duration = end_sec - start_sec
-                      if duration < 2:
-                          continue
-                      out_file = f"{out}/{name}_scene_{idx+1:03d}.mp4"
-                      # Use ffmpeg -c copy to preserve audio intact
-                      subprocess.run([
-                          "ffmpeg","-y",
-                          "-ss", str(start_sec),
-                          "-i", path,
-                          "-t", str(duration),
-                          "-c", "copy",
-                          "-avoid_negative_ts", "make_zero",
-                          out_file
-                      ], capture_output=True)
-                      if os.path.exists(out_file) and os.path.getsize(out_file) > 10000:
-                          print(f"  Scene {idx+1}: {duration:.1f}s")
-                      else:
-                          if os.path.exists(out_file): os.remove(out_file)
-              else:
-                  shutil.copy(path, f"{out}/{name}_full.mp4")
-          except Exception as e:
-              print(f"Error: {e}")
-          EOF
-          done
-
-      - name: Build playlist and assemble
+      - name: Process and assemble
         run: |
           python3 - <<'EOF'
           import os, random, json, subprocess, shutil
 
           target_seconds = int("${{ github.event.inputs.target_duration }}")
           music_vol = float("${{ github.event.inputs.music_volume }}")
-          ratio = int("${{ github.event.inputs.sa_living_ratio }}")
           has_music = os.path.exists("music.mp3") and os.path.getsize("music.mp3") > 100000
 
-          tier1, tier2 = [], []
-          for root, dirs, files in os.walk("content/tier1_scenes"):
-              for f in files:
-                  if f.endswith(".mp4"): tier1.append(os.path.join(root, f))
+          clips = []
           for root, dirs, files in os.walk("content/tier2"):
               for f in files:
-                  if f.endswith(".mp4"): tier2.append(os.path.join(root, f))
+                  if f.endswith(".mp4"):
+                      clips.append(os.path.join(root, f))
 
-          random.shuffle(tier1); random.shuffle(tier2)
-          print(f"Tier1: {len(tier1)} | Tier2: {len(tier2)}")
+          random.shuffle(clips)
+          print(f"Total clips: {len(clips)}")
 
-          source = tier2 if tier2 else tier1
-          if not source:
-              print("No content found"); exit(1)
-
-          playlist = []
-          t1_idx = t2_idx = 0
-          while t2_idx < len(source):
-              for i in range(ratio):
-                  if t2_idx < len(source):
-                      playlist.append(source[t2_idx]); t2_idx += 1
-              if t1_idx < len(tier1):
-                  playlist.append(tier1[t1_idx]); t1_idx += 1
-
-          print(f"Playlist: {len(playlist)} clips")
+          if not clips:
+              print("No clips found"); exit(1)
 
           def get_streams(p):
               r = subprocess.run(["ffprobe","-v","quiet","-print_format","json","-show_streams",p],
@@ -184,38 +89,19 @@ jobs:
           processed = []
           total_dur = 0.0
 
-          for i, path in enumerate(playlist):
+          for i, path in enumerate(clips):
               if not os.path.exists(path): continue
               out = f"processed/clip_{i:04d}.mp4"
 
               streams = get_streams(path)
               has_audio = any(s.get("codec_type") == "audio" for s in streams)
-
               if not has_audio:
-                  print(f"Skipping clip {i} - no audio stream")
-                  continue
-
-              # Verify audio actually has data
-              audio_check = subprocess.run([
-                  "ffprobe","-v","quiet","-select_streams","a:0",
-                  "-show_entries","stream=codec_name",
-                  "-print_format","json", path
-              ], capture_output=True, text=True)
-              try:
-                  ainfo = json.loads(audio_check.stdout)
-                  codec = ainfo.get("streams",[{}])[0].get("codec_name","")
-                  if not codec or codec == "none":
-                      print(f"Skipping clip {i} - empty audio codec")
-                      continue
-              except:
-                  print(f"Skipping clip {i} - audio check failed")
-                  continue
+                  print(f"Skipping {i} - no audio"); continue
 
               try:
                   dur = float(next(s for s in streams if s.get("codec_type") == "video")["duration"])
               except:
                   dur = 5.0
-
               if dur < 2: continue
               d = round(dur, 2)
 
@@ -227,32 +113,20 @@ jobs:
                   f"drawbox=x='max(iw-iw*2*((t-{d}/2)/{d}\\,0),0)':y=0:w='min(iw*2*((t-{d}/2)/{d}\\,0),iw)':h=8:color=yellow:t=fill:enable='gt(t,{d}/2)'"
               )
 
-              cmd = ["ffmpeg","-y","-i",path,
-                     "-vf",vf,
-                     "-c:v","libx264","-preset","fast","-crf","23",
-                     "-c:a","aac","-ar","44100","-ac","2",
-                     "-shortest", out]
+              r = subprocess.run([
+                  "ffmpeg","-y","-i",path,
+                  "-vf",vf,
+                  "-c:v","libx264","-preset","fast","-crf","23",
+                  "-c:a","aac","-ar","44100","-ac","2",
+                  "-shortest", out
+              ], capture_output=True, text=True)
 
-              r = subprocess.run(cmd, capture_output=True, text=True)
               if r.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 10000:
                   processed.append(out)
                   total_dur += dur
                   print(f"[{i+1}] {dur:.1f}s | total={total_dur:.1f}s")
               else:
-                  # Try re-encoding audio from scratch
-                  cmd2 = ["ffmpeg","-y","-i",path,
-                          "-vf",vf,
-                          "-c:v","libx264","-preset","fast","-crf","23",
-                          "-af","aresample=44100",
-                          "-c:a","aac","-ar","44100","-ac","2",
-                          "-shortest", out]
-                  r2 = subprocess.run(cmd2, capture_output=True, text=True)
-                  if r2.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 10000:
-                      processed.append(out)
-                      total_dur += dur
-                      print(f"[{i+1}] {dur:.1f}s (resampled) | total={total_dur:.1f}s")
-                  else:
-                      print(f"Skipping clip {i} - bad audio")
+                  print(f"Skipping {i} - encode failed")
 
               if total_dur >= target_seconds:
                   print(f"Reached {target_seconds}s"); break

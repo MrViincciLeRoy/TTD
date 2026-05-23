@@ -8,13 +8,21 @@ on:
         required: true
         default: '210'
       sa_living_ratio:
-        description: 'Insert 1 SA Living clip every N filler clips (e.g. 4)'
+        description: 'Insert 1 SA Living clip every N filler clips'
         required: true
         default: '4'
       music_volume:
-        description: 'Background music volume 0.0-1.0 (e.g. 0.15 for subtle)'
+        description: 'Background music volume 0.0-1.0'
         required: true
         default: '0.15'
+      min_views:
+        description: 'Minimum views filter for Tier1 accounts'
+        required: true
+        default: '10000'
+      clips_per_account:
+        description: 'Max clips to pull per account'
+        required: true
+        default: '15'
 
 jobs:
   assemble:
@@ -27,206 +35,225 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get install -y ffmpeg
-          pip install yt-dlp gdown
+          pip install yt-dlp gdown scenedetect[opencv]
 
-      - name: Download amapiano tracks from Google Drive
+      - name: Download amapiano from Google Drive
         run: |
-          echo "Downloading music tracks..."
+          pip install gdown
+          gdown "1OpuBLpiDokCBnU07sU_zGXBTSxNMc3Kg" -O music1.mp3 || echo "Track 1 failed"
+          gdown "14aGhgjYdHgvdjBgHDJ63O3_SWpUTIxsa" -O music2.mp3 || echo "Track 2 failed"
 
-          # gdown handles Google Drive large file downloads reliably
-          gdown "1OpuBLpiDokCBnU07sU_zGXBTSxNMc3Kg" -O music1.mp3 || \
-            wget -q --no-check-certificate \
-            "https://drive.google.com/uc?export=download&id=1OpuBLpiDokCBnU07sU_zGXBTSxNMc3Kg" \
-            -O music1.mp3
-
-          gdown "14aGhgjYdHgvdjBgHDJ63O3_SWpUTIxsa" -O music2.mp3 || \
-            wget -q --no-check-certificate \
-            "https://drive.google.com/uc?export=download&id=14aGhgjYdHgvdjBgHDJ63O3_SWpUTIxsa" \
-            -O music2.mp3
-
-          ls -lh music*.mp3 2>/dev/null || echo "Music download failed"
-
-      - name: Pick music track randomly
-        run: |
           python3 -c "
           import random, os
           tracks = [f for f in ['music1.mp3','music2.mp3'] if os.path.exists(f) and os.path.getsize(f) > 100000]
           if tracks:
               pick = random.choice(tracks)
-              os.rename(pick, 'music.mp3')
+              import shutil
+              shutil.copy(pick, 'music.mp3')
               print(f'Using: {pick}')
           else:
-              print('No valid music found')
+              print('No music available')
           "
 
-      - name: Collect and shuffle clips
+      - name: Download Tier1 - SA Living reposts
         run: |
-          python3 - <<'EOF'
-          import os, random, json
+          mkdir -p content/tier1
 
-          tier1 = []
-          if os.path.exists("content/tier1_scenes"):
-              for root, dirs, files in os.walk("content/tier1_scenes"):
-                  for f in files:
-                      if f.endswith(".mp4"):
-                          tier1.append(os.path.join(root, f))
+          ACCOUNTS=(
+            "funnycomedyscreen"
+            "moment.later4.1"
+            "mfanakahtk.co.za"
+            "sachoasvibes"
+          )
 
-          tier2 = []
-          if os.path.exists("content/tier2"):
-              for root, dirs, files in os.walk("content/tier2"):
-                  for f in files:
-                      if f.endswith(".mp4"):
-                          tier2.append(os.path.join(root, f))
+          for account in "${ACCOUNTS[@]}"; do
+            echo "=== @$account ==="
+            mkdir -p "content/tier1/$account"
+            yt-dlp \
+              --match-filter "view_count>=${{ github.event.inputs.min_views }}" \
+              --max-downloads "${{ github.event.inputs.clips_per_account }}" \
+              --playlist-end "${{ github.event.inputs.clips_per_account }}" \
+              -o "content/tier1/$account/%(id)s.%(ext)s" \
+              --no-warnings --ignore-errors \
+              "https://www.tiktok.com/@$account" || true
+            echo "Got $(ls content/tier1/$account/*.mp4 2>/dev/null | wc -l) videos"
+          done
 
-          random.shuffle(tier1)
-          random.shuffle(tier2)
+      - name: Download Tier2 - Filler content
+        run: |
+          mkdir -p content/tier2
 
-          print(f"Tier1 (SA Living scenes): {len(tier1)}")
-          print(f"Tier2 (Filler): {len(tier2)}")
+          ACCOUNTS=(
+            "daily_sa_1"
+            "mzansimemes1"
+            "funnyorama"
+            "fun.only52"
+            "available4.8"
+            "funny.clips.57"
+          )
 
-          if not tier2:
-              print("ERROR: No filler content found. Run sa_content_pipeline first.")
-              exit(1)
+          for account in "${ACCOUNTS[@]}"; do
+            echo "=== @$account ==="
+            mkdir -p "content/tier2/$account"
+            yt-dlp \
+              --max-downloads "${{ github.event.inputs.clips_per_account }}" \
+              --playlist-end "${{ github.event.inputs.clips_per_account }}" \
+              -o "content/tier2/$account/%(id)s.%(ext)s" \
+              --no-warnings --ignore-errors \
+              "https://www.tiktok.com/@$account" || true
+            echo "Got $(ls content/tier2/$account/*.mp4 2>/dev/null | wc -l) videos"
+          done
 
-          ratio = int("${{ github.event.inputs.sa_living_ratio }}")
-          playlist = []
-          t1_idx = 0
-          t2_idx = 0
+      - name: Split Tier1 into scenes
+        run: |
+          mkdir -p content/tier1_scenes
+          find content/tier1 -name "*.mp4" | while read video; do
+            account=$(echo "$video" | cut -d'/' -f3)
+            filename=$(basename "$video" .mp4)
+            outdir="content/tier1_scenes/$account"
+            mkdir -p "$outdir"
+            python3 - <<EOF
+          from scenedetect import open_video, SceneManager
+          from scenedetect.detectors import ContentDetector
+          from scenedetect.video_splitter import split_video_ffmpeg
+          import shutil
 
-          while t2_idx < len(tier2):
-              for i in range(ratio):
-                  if t2_idx < len(tier2):
-                      playlist.append({"path": tier2[t2_idx], "tier": "filler"})
-                      t2_idx += 1
-              if t1_idx < len(tier1):
-                  playlist.append({"path": tier1[t1_idx], "tier": "sa_living"})
-                  t1_idx += 1
+          path = "$video"
+          out = "$outdir"
+          name = "$filename"
 
-          print(f"Playlist: {len(playlist)} clips")
-          with open("playlist.json", "w") as f:
-              json.dump(playlist, f, indent=2)
+          try:
+              v = open_video(path)
+              sm = SceneManager()
+              sm.add_detector(ContentDetector(threshold=27.0))
+              sm.detect_scenes(v)
+              scenes = sm.get_scene_list()
+              if len(scenes) <= 1:
+                  v = open_video(path)
+                  sm = SceneManager()
+                  sm.add_detector(ContentDetector(threshold=15.0))
+                  sm.detect_scenes(v)
+                  scenes = sm.get_scene_list()
+              print(f"{name}: {len(scenes)} scenes")
+              if len(scenes) > 1:
+                  split_video_ffmpeg(path, scenes, output_dir=out, output_file_template=f"{name}_\$SCENE_NUMBER.mp4")
+              else:
+                  shutil.copy(path, f"{out}/{name}_full.mp4")
+          except Exception as e:
+              print(f"Error: {e}")
           EOF
+          done
 
-      - name: Process clips and assemble
+      - name: Build playlist and assemble
         run: |
           python3 - <<'EOF'
-          import json, os, subprocess
-
-          with open("playlist.json") as f:
-              playlist = json.load(f)
+          import os, random, json, subprocess, shutil
 
           target_seconds = int("${{ github.event.inputs.target_duration }}")
           music_vol = float("${{ github.event.inputs.music_volume }}")
+          ratio = int("${{ github.event.inputs.sa_living_ratio }}")
           has_music = os.path.exists("music.mp3") and os.path.getsize("music.mp3") > 100000
+
+          # Collect clips
+          tier1, tier2 = [], []
+          for root, dirs, files in os.walk("content/tier1_scenes"):
+              for f in files:
+                  if f.endswith(".mp4"): tier1.append(os.path.join(root, f))
+          for root, dirs, files in os.walk("content/tier2"):
+              for f in files:
+                  if f.endswith(".mp4"): tier2.append(os.path.join(root, f))
+
+          random.shuffle(tier1)
+          random.shuffle(tier2)
+          print(f"Tier1: {len(tier1)} | Tier2: {len(tier2)}")
+
+          if not tier2 and not tier1:
+              print("No content downloaded. Check account handles.")
+              exit(1)
+
+          # Use whatever we have
+          all_clips = tier2 if tier2 else []
+          if not all_clips:
+              all_clips = tier1
+
+          # Build playlist
+          playlist = []
+          t1_idx = t2_idx = 0
+          source = tier2 if tier2 else tier1
+          while t2_idx < len(source):
+              for i in range(ratio):
+                  if t2_idx < len(source):
+                      playlist.append(source[t2_idx]); t2_idx += 1
+              if t1_idx < len(tier1):
+                  playlist.append(tier1[t1_idx]); t1_idx += 1
+
+          print(f"Playlist: {len(playlist)} clips")
 
           os.makedirs("processed", exist_ok=True)
           processed = []
-          total_duration = 0.0
+          total_dur = 0.0
 
-          for i, clip in enumerate(playlist):
-              path = clip["path"]
+          for i, path in enumerate(playlist):
+              if not os.path.exists(path): continue
               out = f"processed/clip_{i:04d}.mp4"
 
-              if not os.path.exists(path):
-                  continue
-
               # Get duration
-              result = subprocess.run([
-                  "ffprobe", "-v", "quiet",
-                  "-print_format", "json",
-                  "-show_streams", path
-              ], capture_output=True, text=True)
-
+              r = subprocess.run(["ffprobe","-v","quiet","-print_format","json","-show_streams",path],
+                                 capture_output=True, text=True)
               try:
-                  import json as j
-                  info = j.loads(result.stdout)
-                  duration = float(info["streams"][0].get("duration", 0))
+                  dur = float(json.loads(r.stdout)["streams"][0].get("duration", 5))
               except:
-                  duration = 5.0
+                  dur = 5.0
+              if dur < 2: continue
 
-              if duration < 2:
-                  continue
-
-              dur = round(duration, 2)
-
-              # Scale to vertical + animated yellow border (bottom-left to top-right)
+              d = round(dur, 2)
               vf = (
-                  "scale=1080:1920:force_original_aspect_ratio=decrease,"
-                  "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
+                  f"scale=1080:1920:force_original_aspect_ratio=decrease,"
+                  f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,"
                   f"drawbox=x=0:y=0:w=1080:h=1920:color=yellow@0.9:t=8,"
-                  # Bottom edge fills left to right in first half
-                  f"drawbox=x=0:y=ih-8:w='min(iw*2*(t/{dur}\\,1),iw)':h=8:color=yellow:t=fill:enable='lte(t,{dur}/2)',"
-                  # Top edge fills right to left in second half  
-                  f"drawbox=x='max(iw-iw*2*((t-{dur}/2)/{dur}\\,0),0)':y=0:w='min(iw*2*((t-{dur}/2)/{dur}\\,0),iw)':h=8:color=yellow:t=fill:enable='gt(t,{dur}/2)'"
+                  f"drawbox=x=0:y=ih-8:w='min(iw*2*(t/{d}\\,1),iw)':h=8:color=yellow:t=fill:enable='lte(t,{d}/2)',"
+                  f"drawbox=x='max(iw-iw*2*((t-{d}/2)/{d}\\,0),0)':y=0:w='min(iw*2*((t-{d}/2)/{d}\\,0),iw)':h=8:color=yellow:t=fill:enable='gt(t,{d}/2)'"
               )
 
-              cmd = [
-                  "ffmpeg", "-y", "-i", path,
+              r = subprocess.run([
+                  "ffmpeg","-y","-i",path,
                   "-vf", vf,
-                  "-c:v", "libx264",
-                  "-preset", "fast",
-                  "-crf", "23",
-                  "-c:a", "aac",
-                  "-ar", "44100",
-                  "-shortest",
-                  out
-              ]
+                  "-c:v","libx264","-preset","fast","-crf","23",
+                  "-c:a","aac","-ar","44100","-shortest", out
+              ], capture_output=True, text=True)
 
-              result = subprocess.run(cmd, capture_output=True, text=True)
-              if result.returncode == 0 and os.path.exists(out):
+              if r.returncode == 0 and os.path.exists(out):
                   processed.append(out)
-                  total_duration += duration
-                  print(f"[{i+1}/{len(playlist)}] {clip['tier']} | {duration:.1f}s | total={total_duration:.1f}s")
+                  total_dur += dur
+                  print(f"[{i+1}] {dur:.1f}s | total={total_dur:.1f}s")
               else:
-                  print(f"Failed clip {i}: {result.stderr[-150:]}")
+                  print(f"Failed {i}: {r.stderr[-100:]}")
 
-              if total_duration >= target_seconds:
-                  print(f"Reached target {target_seconds}s")
-                  break
+              if total_dur >= target_seconds:
+                  print(f"Reached target {target_seconds}s"); break
 
-          print(f"\nProcessed {len(processed)} clips | {total_duration:.1f}s total")
+          print(f"\n{len(processed)} clips | {total_dur:.1f}s")
 
-          # Concatenate
-          with open("concat_list.txt", "w") as f:
-              for p in processed:
-                  f.write(f"file '{p}'\n")
-
-          subprocess.run([
-              "ffmpeg", "-y",
-              "-f", "concat", "-safe", "0",
-              "-i", "concat_list.txt",
-              "-c", "copy",
-              "combined.mp4"
-          ], check=True)
+          # Concat
+          with open("concat_list.txt","w") as f:
+              for p in processed: f.write(f"file '{p}'\n")
+          subprocess.run(["ffmpeg","-y","-f","concat","-safe","0","-i","concat_list.txt","-c","copy","combined.mp4"], check=True)
 
           # Mix music
           if has_music:
-              result = subprocess.run([
-                  "ffmpeg", "-y",
-                  "-i", "combined.mp4",
-                  "-stream_loop", "-1",
-                  "-i", "music.mp3",
-                  "-filter_complex",
-                  f"[1:a]volume={music_vol}[music];[0:a][music]amix=inputs=2:duration=first:dropout_transition=2[aout]",
-                  "-map", "0:v",
-                  "-map", "[aout]",
-                  "-c:v", "copy",
-                  "-c:a", "aac",
-                  "-shortest",
-                  "final_output.mp4"
+              r = subprocess.run([
+                  "ffmpeg","-y","-i","combined.mp4","-stream_loop","-1","-i","music.mp3",
+                  "-filter_complex",f"[1:a]volume={music_vol}[m];[0:a][m]amix=inputs=2:duration=first[aout]",
+                  "-map","0:v","-map","[aout]","-c:v","copy","-c:a","aac","-shortest","final_output.mp4"
               ], capture_output=True, text=True)
-
-              if result.returncode == 0:
-                  print("Music mixed successfully")
-              else:
-                  print(f"Music mix failed: {result.stderr[-200:]}")
-                  os.rename("combined.mp4", "final_output.mp4")
+              if r.returncode != 0:
+                  print(f"Music failed: {r.stderr[-200:]}")
+                  shutil.copy("combined.mp4","final_output.mp4")
           else:
-              print("No music — skipping mix")
-              os.rename("combined.mp4", "final_output.mp4")
+              shutil.copy("combined.mp4","final_output.mp4")
 
-          size = os.path.getsize("final_output.mp4") / (1024*1024)
-          print(f"\nDone: final_output.mp4 ({size:.1f}MB)")
+          mb = os.path.getsize("final_output.mp4")/1024/1024
+          print(f"Done: {mb:.1f}MB")
           EOF
 
       - name: Upload final video

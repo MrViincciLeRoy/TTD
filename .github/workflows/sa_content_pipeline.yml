@@ -1,0 +1,207 @@
+name: SA Content Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      min_views:
+        description: 'Minimum views to include a video (e.g. 10000)'
+        required: true
+        default: '10000'
+      max_videos_per_account:
+        description: 'Max videos to pull per account'
+        required: true
+        default: '30'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install yt-dlp
+          sudo apt-get install -y ffmpeg
+
+      - name: Download Tier 1 - SA Living reposts
+        run: |
+          mkdir -p content/tier1
+
+          ACCOUNTS=(
+            "funnycomedyscreen"
+            "moment.later4.1"
+            "mfanakahtk.co.za"
+            "sachoasvibes"
+          )
+
+          MIN_VIEWS="${{ github.event.inputs.min_views }}"
+          MAX_VIDS="${{ github.event.inputs.max_videos_per_account }}"
+
+          for account in "${ACCOUNTS[@]}"; do
+            echo "=== Downloading @$account ==="
+            mkdir -p "content/tier1/$account"
+
+            yt-dlp \
+              --match-filter "view_count>=$MIN_VIEWS" \
+              --max-downloads "$MAX_VIDS" \
+              --playlist-end "$MAX_VIDS" \
+              -o "content/tier1/$account/%(view_count)sviews_%(id)s.%(ext)s" \
+              --no-warnings \
+              --ignore-errors \
+              "https://www.tiktok.com/@$account" || echo "Done or error on $account"
+
+            COUNT=$(ls content/tier1/$account/*.mp4 2>/dev/null | wc -l)
+            echo "Got $COUNT videos from @$account"
+          done
+
+      - name: Download Tier 2 - Filler content
+        run: |
+          mkdir -p content/tier2
+
+          ACCOUNTS=(
+            "daily_sa_1"
+            "mzansimemes1"
+            "funnyorama"
+            "fun.only52"
+            "available4.8"
+            "funny.clips.57"
+          )
+
+          MAX_VIDS="${{ github.event.inputs.max_videos_per_account }}"
+
+          for account in "${ACCOUNTS[@]}"; do
+            echo "=== Downloading @$account ==="
+            mkdir -p "content/tier2/$account"
+
+            yt-dlp \
+              --max-downloads "$MAX_VIDS" \
+              --playlist-end "$MAX_VIDS" \
+              -o "content/tier2/$account/%(view_count)sviews_%(id)s.%(ext)s" \
+              --no-warnings \
+              --ignore-errors \
+              "https://www.tiktok.com/@$account" || echo "Done or error on $account"
+
+            COUNT=$(ls content/tier2/$account/*.mp4 2>/dev/null | wc -l)
+            echo "Got $COUNT videos from @$account"
+          done
+
+      - name: Split Tier 1 videos into scenes
+        run: |
+          pip install scenedetect[opencv]
+          mkdir -p content/tier1_scenes
+
+          find content/tier1 -name "*.mp4" | while read video; do
+            account=$(echo "$video" | cut -d'/' -f3)
+            filename=$(basename "$video" .mp4)
+            outdir="content/tier1_scenes/$account"
+            mkdir -p "$outdir"
+
+            echo "Splitting: $video"
+            python3 - <<EOF
+          from scenedetect import open_video, SceneManager
+          from scenedetect.detectors import ContentDetector
+          from scenedetect.video_splitter import split_video_ffmpeg
+
+          video_path = "$video"
+          out_dir = "$outdir"
+
+          try:
+              video = open_video(video_path)
+              sm = SceneManager()
+              sm.add_detector(ContentDetector(threshold=27.0))
+              sm.detect_scenes(video)
+              scenes = sm.get_scene_list()
+
+              # retry with lower threshold if no scenes found
+              if len(scenes) <= 1:
+                  video = open_video(video_path)
+                  sm = SceneManager()
+                  sm.add_detector(ContentDetector(threshold=15.0))
+                  sm.detect_scenes(video)
+                  scenes = sm.get_scene_list()
+
+              print(f"  {len(scenes)} scenes detected in $filename")
+
+              if len(scenes) > 1:
+                  split_video_ffmpeg(
+                      video_path,
+                      scenes,
+                      output_dir=out_dir,
+                      output_file_template="${filename}_scene_\$SCENE_NUMBER.mp4",
+                      min_scene_len=4
+                  )
+              else:
+                  import shutil
+                  shutil.copy(video_path, f"{out_dir}/{filename}_full.mp4")
+          except Exception as e:
+              print(f"  Error: {e}")
+          EOF
+          done
+
+      - name: Print content summary
+        run: |
+          echo "==============================="
+          echo "CONTENT SUMMARY"
+          echo "==============================="
+          echo ""
+          echo "TIER 1 - Original videos:"
+          for account in content/tier1/*/; do
+            name=$(basename "$account")
+            count=$(ls "$account"*.mp4 2>/dev/null | wc -l)
+            echo "  @$name: $count videos"
+          done
+
+          echo ""
+          echo "TIER 1 - Split scenes:"
+          TOTAL_SCENES=0
+          for account in content/tier1_scenes/*/; do
+            name=$(basename "$account")
+            count=$(ls "$account"*.mp4 2>/dev/null | wc -l)
+            TOTAL_SCENES=$((TOTAL_SCENES + count))
+            echo "  @$name: $count scenes"
+          done
+          echo "  TOTAL SCENES: $TOTAL_SCENES"
+
+          echo ""
+          echo "TIER 2 - Filler videos:"
+          TOTAL_FILLER=0
+          for account in content/tier2/*/; do
+            name=$(basename "$account")
+            count=$(ls "$account"*.mp4 2>/dev/null | wc -l)
+            TOTAL_FILLER=$((TOTAL_FILLER + count))
+            echo "  @$name: $count videos"
+          done
+          echo "  TOTAL FILLER: $TOTAL_FILLER"
+
+      - name: Zip tier1 scenes
+        run: |
+          cd content/tier1_scenes
+          zip -r ../../tier1_scenes.zip . 2>/dev/null || echo "Nothing to zip"
+          cd ../..
+
+      - name: Zip tier2 filler
+        run: |
+          cd content/tier2
+          zip -r ../../tier2_filler.zip . 2>/dev/null || echo "Nothing to zip"
+          cd ../..
+
+      - name: Upload Tier 1 scenes
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier1-scenes
+          path: tier1_scenes.zip
+          retention-days: 7
+
+      - name: Upload Tier 2 filler
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier2-filler
+          path: tier2_filler.zip
+          retention-days: 7

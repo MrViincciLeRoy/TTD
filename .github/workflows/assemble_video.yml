@@ -1,9 +1,9 @@
 name: Assemble Final Video
 
 on:
-  schedule:
-    - cron: '0 6 * * 1-6'   # Mon-Sat 08:00 SAST (UTC+2)
-    - cron: '0 17 * * 1-6'  # Mon-Sat 19:00 SAST (UTC+2)
+  #schedule:
+    #- cron: '0 6 * * 1-6'   # Mon-Sat 08:00 SAST (UTC+2)
+    #- cron: '0 17 * * 1-6'  # Mon-Sat 19:00 SAST (UTC+2)
   workflow_dispatch:
     inputs:
       target_duration:

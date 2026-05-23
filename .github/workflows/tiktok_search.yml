@@ -1,0 +1,85 @@
+name: TikTok Search Download
+
+on:
+  workflow_dispatch:
+    inputs:
+      search_term:
+        description: 'Search term or hashtag (e.g. southafricanliving)'
+        required: true
+        default: 'southafricanliving'
+      max_videos:
+        description: 'Max number of videos to download'
+        required: true
+        default: '10'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install TikTokApi yt-dlp
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Search and collect video URLs
+        run: |
+          python3 - <<'EOF'
+          import asyncio
+          import json
+          from TikTokApi import TikTokApi
+
+          search_term = "${{ github.event.inputs.search_term }}"
+          max_videos = int("${{ github.event.inputs.max_videos }}")
+
+          async def get_videos():
+              urls = []
+              async with TikTokApi() as api:
+                  await api.create_sessions(
+                      ms_tokens=[None],
+                      num_sessions=1,
+                      sleep_after=3,
+                      headless=True
+                  )
+                  async for video in api.search.videos(search_term, count=max_videos):
+                      url = f"https://www.tiktok.com/@{video.author.username}/video/{video.id}"
+                      urls.append(url)
+                      print(f"Found: {url}")
+
+              with open("urls.txt", "w") as f:
+                  f.write("\n".join(urls))
+              print(f"Total: {len(urls)} videos found")
+
+          asyncio.run(get_videos())
+          EOF
+
+      - name: Download videos
+        run: |
+          mkdir -p output
+          while IFS= read -r url; do
+            echo "Downloading: $url"
+            yt-dlp -o "output/%(uploader)s_%(id)s.%(ext)s" "$url" || echo "Failed: $url"
+          done < urls.txt
+
+      - name: Zip videos
+        run: |
+          cd output
+          zip -r ../tiktok_videos.zip *.mp4 2>/dev/null || echo "No mp4 files found"
+          cd ..
+          ls -lh tiktok_videos.zip 2>/dev/null || echo "Zip empty"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiktok-videos
+          path: tiktok_videos.zip
+          retention-days: 7

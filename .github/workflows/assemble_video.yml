@@ -1,12 +1,15 @@
 name: Assemble Final Video
 
 on:
+  schedule:
+    - cron: '0 6 * * 1-6'   # Mon-Sat 08:00 SAST (UTC+2)
+    - cron: '0 17 * * 1-6'  # Mon-Sat 19:00 SAST (UTC+2)
   workflow_dispatch:
     inputs:
       target_duration:
-        description: 'Target video duration in seconds (900 = 15 min)'
+        description: 'Target video duration in seconds (max 840 = unverified limit)'
         required: true
-        default: '900'
+        default: '840'
       music_volume:
         description: 'Background music volume 0.0-1.0'
         required: true
@@ -62,8 +65,8 @@ jobs:
             echo "=== @$account ==="
             mkdir -p "content/tier2/$account"
             yt-dlp \
-              --max-downloads "${{ github.event.inputs.clips_per_account }}" \
-              --playlist-end "${{ github.event.inputs.clips_per_account }}" \
+              --max-downloads "${{ github.event.inputs.clips_per_account || '30' }}" \
+              --playlist-end "${{ github.event.inputs.clips_per_account || '30' }}" \
               -o "content/tier2/$account/%(id)s.%(ext)s" \
               --no-warnings --ignore-errors \
               "https://www.tiktok.com/@$account" || true
@@ -75,8 +78,8 @@ jobs:
           python3 - <<'EOF'
           import os, random, json, subprocess, shutil
 
-          target_seconds = int("${{ github.event.inputs.target_duration }}")
-          music_vol = float("${{ github.event.inputs.music_volume }}")
+          target_seconds = int("${{ github.event.inputs.target_duration || '840' }}")
+          music_vol = float("${{ github.event.inputs.music_volume || '0.08' }}")
           has_music = os.path.exists("music.mp3") and os.path.getsize("music.mp3") > 100000
 
           with open("tracked_ids.json") as f:

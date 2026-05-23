@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       search_term:
-        description: 'Search term or hashtag (e.g. southafricanliving)'
+        description: 'Hashtag to search (without #)'
         required: true
         default: 'southafricanliving'
       max_videos:
@@ -28,19 +28,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install TikTokApi yt-dlp
-          playwright install chromium
-          playwright install-deps chromium
-
-      - name: Print TikTokApi version and available methods
-        run: |
-          python3 - <<'EOF'
-          import TikTokApi
-          #print("Version:", TikTokApi.__version__)
-          from TikTokApi import TikTokApi as api
-          print("TikTokApi methods:", [m for m in dir(api) if not m.startswith('_')])
-          from TikTokApi.api import search
-          print("Search methods:", [m for m in dir(search.Search) if not m.startswith('_')])
-          EOF
+          playwright install webkit
+          playwright install-deps webkit
 
       - name: Search and collect video URLs
         run: |
@@ -57,13 +46,17 @@ jobs:
                   await api.create_sessions(
                       ms_tokens=[None],
                       num_sessions=1,
-                      sleep_after=3,
-                      headless=True
+                      sleep_after=5,
+                      headless=True,
+                      browser="webkit"
                   )
-                  async for video in api.hashtag(name=search_term).videos(count=max_videos):
-                      url = f"https://www.tiktok.com/@{video.author.username}/video/{video.id}"
-                      urls.append(url)
-                      print(f"Found: {url}")
+                  try:
+                      async for video in api.hashtag(name=search_term).videos(count=max_videos):
+                          url = f"https://www.tiktok.com/@{video.author.username}/video/{video.id}"
+                          urls.append(url)
+                          print(f"Found: {url}")
+                  except Exception as e:
+                      print(f"Hashtag fetch error: {e}")
 
               with open("urls.txt", "w") as f:
                   f.write("\n".join(urls))
@@ -72,9 +65,16 @@ jobs:
           asyncio.run(get_videos())
           EOF
 
+      - name: Show collected URLs
+        run: cat urls.txt || echo "urls.txt empty"
+
       - name: Download videos
         run: |
           mkdir -p output
+          if [ ! -s urls.txt ]; then
+            echo "No URLs to download"
+            exit 0
+          fi
           while IFS= read -r url; do
             echo "Downloading: $url"
             yt-dlp -o "output/%(uploader)s_%(id)s.%(ext)s" "$url" || echo "Failed: $url"
@@ -83,9 +83,9 @@ jobs:
       - name: Zip videos
         run: |
           cd output
-          zip -r ../tiktok_videos.zip *.mp4 2>/dev/null || echo "No mp4 files found"
+          zip -r ../tiktok_videos.zip . 2>/dev/null || echo "Nothing to zip"
           cd ..
-          ls -lh tiktok_videos.zip 2>/dev/null || echo "Zip empty"
+          ls -lh tiktok_videos.zip 2>/dev/null || echo "Zip not created"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

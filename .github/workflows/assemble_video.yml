@@ -93,8 +93,8 @@ jobs:
             python3 - <<EOF
           from scenedetect import open_video, SceneManager
           from scenedetect.detectors import ContentDetector
-          from scenedetect.video_splitter import split_video_ffmpeg
-          import shutil
+          import subprocess, shutil, os
+
           path, out, name = "$video", "$outdir", "$filename"
           try:
               v = open_video(path)
@@ -110,7 +110,27 @@ jobs:
                   scenes = sm.get_scene_list()
               print(f"{name}: {len(scenes)} scenes")
               if len(scenes) > 1:
-                  split_video_ffmpeg(path, scenes, output_dir=out, output_file_template=f"{name}_\$SCENE_NUMBER.mp4")
+                  for idx, (start, end) in enumerate(scenes):
+                      start_sec = start.get_seconds()
+                      end_sec = end.get_seconds()
+                      duration = end_sec - start_sec
+                      if duration < 2:
+                          continue
+                      out_file = f"{out}/{name}_scene_{idx+1:03d}.mp4"
+                      # Use ffmpeg -c copy to preserve audio intact
+                      subprocess.run([
+                          "ffmpeg","-y",
+                          "-ss", str(start_sec),
+                          "-i", path,
+                          "-t", str(duration),
+                          "-c", "copy",
+                          "-avoid_negative_ts", "make_zero",
+                          out_file
+                      ], capture_output=True)
+                      if os.path.exists(out_file) and os.path.getsize(out_file) > 10000:
+                          print(f"  Scene {idx+1}: {duration:.1f}s")
+                      else:
+                          if os.path.exists(out_file): os.remove(out_file)
               else:
                   shutil.copy(path, f"{out}/{name}_full.mp4")
           except Exception as e:

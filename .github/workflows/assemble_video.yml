@@ -4,17 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       target_duration:
-        description: 'Target video duration in seconds (min 180 for monetization)'
+        description: 'Target video duration in seconds (900 = 15 min)'
         required: true
-        default: '210'
+        default: '900'
       music_volume:
         description: 'Background music volume 0.0-1.0'
         required: true
-        default: '0.15'
+        default: '0.08'
       clips_per_account:
         description: 'Max clips to pull per account'
         required: true
-        default: '15'
+        default: '30'
 
 jobs:
   assemble:
@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get install -y ffmpeg
-          pip install yt-dlp gdown
+          pip install yt-dlp gdown google-api-python-client google-auth
 
       - name: Download amapiano from Google Drive
         run: |
@@ -42,6 +42,16 @@ jobs:
           else:
               print('No music available')
           "
+
+      - name: Load tracked IDs
+        run: |
+          if [ -f "tracked_ids.json" ]; then
+            echo "Loaded existing tracked_ids.json"
+            cat tracked_ids.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(f'Tracked: {len(d.get(\"ids\",[]))} clip IDs')"
+          else
+            echo '{"ids": []}' > tracked_ids.json
+            echo "Created fresh tracked_ids.json"
+          fi
 
       - name: Download Tier2 clips
         run: |
@@ -67,16 +77,27 @@ jobs:
           music_vol = float("${{ github.event.inputs.music_volume }}")
           has_music = os.path.exists("music.mp3") and os.path.getsize("music.mp3") > 100000
 
+          # Load tracked IDs
+          with open("tracked_ids.json") as f:
+              tracker = json.load(f)
+          tracked = set(tracker.get("ids", []))
+          print(f"Already tracked: {len(tracked)} IDs")
+
+          # Collect clips
           clips = []
           for root, dirs, files in os.walk("content/tier2"):
               for f in files:
                   if f.endswith(".mp4"):
-                      clips.append(os.path.join(root, f))
+                      clip_id = os.path.splitext(f)[0]
+                      if clip_id in tracked:
+                          print(f"Skipping tracked: {clip_id}")
+                          continue
+                      clips.append((clip_id, os.path.join(root, f)))
 
           random.shuffle(clips)
-          print(f"Total clips: {len(clips)}")
+          print(f"New clips available: {len(clips)}")
           if not clips:
-              print("No clips found"); exit(1)
+              print("No new clips — all tracked or none downloaded"); exit(1)
 
           def get_info(p):
               r = subprocess.run(
@@ -87,16 +108,17 @@ jobs:
 
           os.makedirs("processed", exist_ok=True)
           processed = []
+          used_ids = []
           total_dur = 0.0
 
-          for i, path in enumerate(clips):
+          for i, (clip_id, path) in enumerate(clips):
               if not os.path.exists(path): continue
               out = f"processed/clip_{i:04d}.mp4"
 
               streams = get_info(path)
               has_audio = any(s.get("codec_type") == "audio" for s in streams)
               if not has_audio:
-                  print(f"Skipping {i} - no audio"); continue
+                  print(f"Skipping {clip_id} - no audio"); continue
 
               try:
                   dur = float(next(s for s in streams if s.get("codec_type") == "video")["duration"])
@@ -104,7 +126,6 @@ jobs:
                   dur = 5.0
               if dur < 2: continue
 
-              # Simple scale only - no animated border
               r = subprocess.run([
                   "ffmpeg", "-y", "-i", path,
                   "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
@@ -115,10 +136,11 @@ jobs:
 
               if r.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 10000:
                   processed.append(out)
+                  used_ids.append(clip_id)
                   total_dur += dur
-                  print(f"[{i+1}] {dur:.1f}s | total={total_dur:.1f}s")
+                  print(f"[{i+1}] {clip_id} | {dur:.1f}s | total={total_dur:.1f}s")
               else:
-                  print(f"Skipping {i} - encode failed: {r.stderr[-150:]}")
+                  print(f"Skipping {clip_id} - encode failed")
 
               if total_dur >= target_seconds:
                   print(f"Reached {target_seconds}s"); break
@@ -127,6 +149,7 @@ jobs:
           if not processed:
               print("Nothing processed"); exit(1)
 
+          # Concat
           with open("concat_list.txt", "w") as f:
               for p in processed: f.write(f"file '{p}'\n")
 
@@ -135,6 +158,7 @@ jobs:
               "-i", "concat_list.txt", "-c", "copy", "combined.mp4"
           ], check=True)
 
+          # Mix music
           if has_music:
               r = subprocess.run([
                   "ffmpeg", "-y", "-i", "combined.mp4",
@@ -150,10 +174,34 @@ jobs:
           else:
               shutil.copy("combined.mp4", "final_output.mp4")
 
-          print(f"Done: {os.path.getsize('final_output.mp4')/1024/1024:.1f}MB")
+          # Update tracker
+          tracker["ids"] = list(tracked | set(used_ids))
+          with open("tracked_ids.json", "w") as f:
+              json.dump(tracker, f, indent=2)
+          print(f"Tracker updated: {len(tracker['ids'])} total IDs")
+
+          mb = os.path.getsize("final_output.mp4") / 1024 / 1024
+          print(f"Done: {mb:.1f}MB")
           EOF
 
-      - name: Upload final video
+      - name: Commit tracked IDs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add tracked_ids.json
+          git diff --staged --quiet || git commit -m "Update tracked_ids.json [skip ci]"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Decode token and upload to YouTube
+        run: |
+          echo "${{ secrets.YOUTUBE_TOKEN_B64 }}" | base64 -d > token.pkl
+          python3 upload_to_youtube.py
+        env:
+          YOUTUBE_TOKEN_B64: ${{ secrets.YOUTUBE_TOKEN_B64 }}
+
+      - name: Upload final video as artifact
         uses: actions/upload-artifact@v4
         with:
           name: final-video

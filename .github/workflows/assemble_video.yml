@@ -172,7 +172,23 @@ jobs:
               has_audio = any(s.get("codec_type") == "audio" for s in streams)
 
               if not has_audio:
-                  print(f"Skipping clip {i} - no audio")
+                  print(f"Skipping clip {i} - no audio stream")
+                  continue
+
+              # Verify audio actually has data
+              audio_check = subprocess.run([
+                  "ffprobe","-v","quiet","-select_streams","a:0",
+                  "-show_entries","stream=codec_name",
+                  "-print_format","json", path
+              ], capture_output=True, text=True)
+              try:
+                  ainfo = json.loads(audio_check.stdout)
+                  codec = ainfo.get("streams",[{}])[0].get("codec_name","")
+                  if not codec or codec == "none":
+                      print(f"Skipping clip {i} - empty audio codec")
+                      continue
+              except:
+                  print(f"Skipping clip {i} - audio check failed")
                   continue
 
               try:
@@ -198,12 +214,25 @@ jobs:
                      "-shortest", out]
 
               r = subprocess.run(cmd, capture_output=True, text=True)
-              if r.returncode == 0 and os.path.exists(out):
+              if r.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 10000:
                   processed.append(out)
                   total_dur += dur
                   print(f"[{i+1}] {dur:.1f}s | total={total_dur:.1f}s")
               else:
-                  print(f"Failed {i}: {r.stderr[-100:]}")
+                  # Try re-encoding audio from scratch
+                  cmd2 = ["ffmpeg","-y","-i",path,
+                          "-vf",vf,
+                          "-c:v","libx264","-preset","fast","-crf","23",
+                          "-af","aresample=44100",
+                          "-c:a","aac","-ar","44100","-ac","2",
+                          "-shortest", out]
+                  r2 = subprocess.run(cmd2, capture_output=True, text=True)
+                  if r2.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 10000:
+                      processed.append(out)
+                      total_dur += dur
+                      print(f"[{i+1}] {dur:.1f}s (resampled) | total={total_dur:.1f}s")
+                  else:
+                      print(f"Skipping clip {i} - bad audio")
 
               if total_dur >= target_seconds:
                   print(f"Reached {target_seconds}s"); break

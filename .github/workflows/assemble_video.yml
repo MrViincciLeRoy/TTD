@@ -19,6 +19,8 @@ on:
 jobs:
   assemble:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repo
@@ -77,13 +79,11 @@ jobs:
           music_vol = float("${{ github.event.inputs.music_volume }}")
           has_music = os.path.exists("music.mp3") and os.path.getsize("music.mp3") > 100000
 
-          # Load tracked IDs
           with open("tracked_ids.json") as f:
               tracker = json.load(f)
           tracked = set(tracker.get("ids", []))
           print(f"Already tracked: {len(tracked)} IDs")
 
-          # Collect clips
           clips = []
           for root, dirs, files in os.walk("content/tier2"):
               for f in files:
@@ -149,7 +149,6 @@ jobs:
           if not processed:
               print("Nothing processed"); exit(1)
 
-          # Concat
           with open("concat_list.txt", "w") as f:
               for p in processed: f.write(f"file '{p}'\n")
 
@@ -158,7 +157,6 @@ jobs:
               "-i", "concat_list.txt", "-c", "copy", "combined.mp4"
           ], check=True)
 
-          # Mix music
           if has_music:
               r = subprocess.run([
                   "ffmpeg", "-y", "-i", "combined.mp4",
@@ -174,7 +172,6 @@ jobs:
           else:
               shutil.copy("combined.mp4", "final_output.mp4")
 
-          # Update tracker
           tracker["ids"] = list(tracked | set(used_ids))
           with open("tracked_ids.json", "w") as f:
               json.dump(tracker, f, indent=2)

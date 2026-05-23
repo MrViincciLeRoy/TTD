@@ -31,11 +31,21 @@ jobs:
           playwright install chromium
           playwright install-deps chromium
 
+      - name: Print TikTokApi version and available methods
+        run: |
+          python3 - <<'EOF'
+          import TikTokApi
+          print("Version:", TikTokApi.__version__)
+          from TikTokApi import TikTokApi as api
+          print("TikTokApi methods:", [m for m in dir(api) if not m.startswith('_')])
+          from TikTokApi.api import search
+          print("Search methods:", [m for m in dir(search.Search) if not m.startswith('_')])
+          EOF
+
       - name: Search and collect video URLs
         run: |
           python3 - <<'EOF'
           import asyncio
-          import json
           from TikTokApi import TikTokApi
 
           search_term = "${{ github.event.inputs.search_term }}"
@@ -50,7 +60,7 @@ jobs:
                       sleep_after=3,
                       headless=True
                   )
-                  async for video in api.search.videos(search_term, count=max_videos):
+                  async for video in api.hashtag(name=search_term).videos(count=max_videos):
                       url = f"https://www.tiktok.com/@{video.author.username}/video/{video.id}"
                       urls.append(url)
                       print(f"Found: {url}")

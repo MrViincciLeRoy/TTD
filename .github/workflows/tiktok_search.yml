@@ -35,7 +35,7 @@ jobs:
         run: |
           python3 - <<'EOF'
           import TikTokApi
-          print("Version:", TikTokApi.__version__)
+          #print("Version:", TikTokApi.__version__)
           from TikTokApi import TikTokApi as api
           print("TikTokApi methods:", [m for m in dir(api) if not m.startswith('_')])
           from TikTokApi.api import search
